@@ -1,0 +1,314 @@
+# server.py
+import socket
+import threading
+import json
+import queue
+from datetime import datetime
+
+class AIBot:
+    def __init__(self):
+        self.active_discussions = {}  # {discussion_id: discussion_data}
+
+    def handle_command(self, command, username, message="", discussion_id=None):
+        command = command.lower().split()[0]
+        message = ' '.join(message.split()[1:]) if len(message.split()) > 1 else ""
+        
+        if discussion_id and discussion_id not in self.active_discussions and command != "/start_discussion":
+            return "No active discussion found. Please start a new discussion with /start_discussion"
+
+        command_handlers = {
+            "/help": self.get_help_message,
+            "/start_discussion": self.start_discussion,
+            "/topic": lambda: self.set_topic(message, discussion_id),
+            "/add_point": lambda: self.add_discussion_point(message, discussion_id),
+            "/respond": lambda: self.add_participant_response(username, message, discussion_id),
+            "/next": lambda: self.next_step(discussion_id),
+            "/summary": lambda: self.generate_summary(discussion_id),
+            "/end": lambda: self.end_discussion(discussion_id)
+        }
+
+        handler = command_handlers.get(command)
+        if handler:
+            return handler()
+        return "Unknown command. Use /help to see available commands."
+
+    def get_help_message(self):
+        return """
+Available Bot Commands:
+/help - Show this help message
+/start_discussion - Start a new discussion session
+/topic [topic] - Set the discussion topic
+/add_point [point] - Add a point for discussion
+/respond [point_number] [message] - Add your response to a specific discussion point
+/next - Move to next discussion step
+/summary - Get current discussion summary
+/end - End current discussion
+        """
+
+    def start_discussion(self):
+        discussion_id = datetime.now().strftime("%Y%m%d%H%M%S")
+        self.active_discussions[discussion_id] = {
+            'topic': None,
+            'step': 0,
+            'points': [],
+            'responses': {},
+            'status': 'active'
+        }
+        return {
+            'message': "Hello! I'm your AI discussion moderator. Let's start a new discussion.\nPlease set the topic using /topic [your topic]",
+            'discussion_id': discussion_id
+        }
+
+    def set_topic(self, topic, discussion_id):
+        if not topic:
+            return "Please provide a topic. Usage: /topic [your topic]"
+        
+        disc = self.active_discussions[discussion_id]
+        disc['topic'] = topic
+        return f"Topic set to: {topic}\nNow, let's add some discussion points using /add_point [your point]"
+
+    def add_discussion_point(self, point, discussion_id):
+        if not point:
+            return "Please provide a discussion point. Usage: /add_point [your point]"
+        
+        disc = self.active_discussions[discussion_id]
+        disc['points'].append(point)
+        return f"Added discussion point: {point}\nUse /next to proceed with the discussion"
+
+    def add_participant_response(self, username, message, discussion_id):
+        disc = self.active_discussions[discussion_id]
+        if not disc['topic']:
+            return "Topic not set. Please set topic first with /topic [your topic]"
+        
+        if not message:
+            return "Please provide your response. Usage: /respond [point_number] [your response]"
+        
+        # Extract point number and response content
+        parts = message.split(maxsplit=1)
+        if len(parts) != 2:
+            return "Invalid format. Usage: /respond [point_number] [your response]"
+        
+        try:
+            point_number = int(parts[0])
+            response_content = parts[1]
+        except ValueError:
+            return "Invalid point number. Usage: /respond [point_number] [your response]"
+        
+        if point_number < 1 or point_number > len(disc['points']):
+            return f"Invalid point number. Please choose a number between 1 and {len(disc['points'])}"
+        
+        # Store response with point number
+        if username not in disc['responses']:
+            disc['responses'][username] = []
+        disc['responses'][username].append({'point': point_number, 'content': response_content})
+        
+        return f"Thank you for your response, {username}!\nUse /next to continue or /summary to see current progress"
+
+    def next_step(self, discussion_id):
+        disc = self.active_discussions[discussion_id]
+        disc['step'] += 1
+        
+        if not disc['topic']:
+            return "Topic not set. Please set topic first with /topic [your topic]"
+            
+        if len(disc['points']) == 0:
+            return "Please add some discussion points first using /add_point"
+            
+        step_responses = {
+            1: f"Current Topic: {disc['topic']}\nDiscussion Points:\n" + 
+               "\n".join([f"{i+1}. {point}" for i, point in enumerate(disc['points'])]),
+            2: "Please share your thoughts using /respond [point_number] [your message]",
+            3: self.generate_summary(discussion_id),
+            4: self.end_discussion(discussion_id)
+        }
+        
+        return step_responses.get(disc['step'], 
+               "Discussion completed. Use /end to finish or /start_discussion to begin new topic")
+
+    def generate_summary(self, discussion_id):
+        disc = self.active_discussions[discussion_id]
+        if not disc['topic']:
+            return "No active discussion to summarize"
+            
+        summary = f"\n=== Discussion Summary ===\n"
+        summary += f"Topic: {disc['topic']}\n\n"
+        
+        summary += "Discussion Points:\n"
+        for i, point in enumerate(disc['points'], start=1):
+            summary += f"{i}. {point}\n"
+            
+            # Display responses for each point
+            summary += "Responses:\n"
+            for username, responses in disc['responses'].items():
+                for response in responses:
+                    if response['point'] == i:
+                        summary += f"- {username}: {response['content']}\n"
+            
+            summary += "\n"
+        
+        return summary
+
+    def end_discussion(self, discussion_id):
+        disc = self.active_discussions[discussion_id]
+        if not disc['topic']:
+            return "No active discussion to end"
+            
+        summary = self.generate_summary(discussion_id)
+        disc['status'] = 'completed'
+        
+        return f"{summary}\n\nDiscussion ended. Thank you for participating!"
+
+class ChatServer:
+    def __init__(self):
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.clients = {}  # {client_socket: {'username': username, 'discussion_id': None}}
+        self.message_queue = queue.Queue()
+        self.ai_bot = AIBot()
+        
+        # Get server IP and port from user
+        self.host = self.get_server_ip()
+        self.port = self.get_server_port()
+        
+    def get_server_ip(self):
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        print(f"\nDetected Local IP: {local_ip}")
+        
+        server_ip = input(f"Enter server IP (press Enter to use {local_ip}): ").strip()
+        if not server_ip:
+            server_ip = local_ip
+        return server_ip
+    
+    def get_server_port(self):
+        while True:
+            try:
+                port = input("Enter port number (1024-65535): ").strip()
+                port_num = int(port)
+                if 1024 <= port_num <= 65535:
+                    return port_num
+                print("Port must be between 1024 and 65535")
+            except ValueError:
+                print("Please enter a valid port number")
+
+    def start(self):
+        try:
+            self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            print(f"\nServer is running on:")
+            print(f"IP Address: {self.host}")
+            print(f"Port: {self.port}")
+            print("\nShare these details with clients to connect.")
+            print("\nWaiting for connections...\n")
+
+            # Start message handler thread
+            threading.Thread(target=self.handle_messages, daemon=True).start()
+
+            while True:
+                client_socket, address = self.server_socket.accept()
+                print(f"New connection from {address}")
+                threading.Thread(target=self.handle_client, args=(client_socket, address)).start()
+
+        except socket.error as e:
+            print(f"\nError starting server: {e}")
+            if e.errno == 98:
+                print("Port is already in use. Try a different port.")
+            elif e.errno == 13:
+                print("Permission denied. Try a port number above 1024.")
+            self.server_socket.close()
+
+    def handle_client(self, client_socket, address):
+        try:
+            username = client_socket.recv(1024).decode()
+            self.clients[client_socket] = {
+                'username': username,
+                'discussion_id': None
+            }
+            print(f"User '{username}' connected from {address}")
+            
+            self.broadcast_message({
+                'type': 'system',
+                'content': f'{username} joined the chat',
+                'sender': 'System'
+            })
+
+            while True:
+                message = client_socket.recv(1024).decode()
+                if not message:
+                    break
+
+                data = json.loads(message)
+                self.message_queue.put((client_socket, data))
+
+        except Exception as e:
+            print(f"Error handling client {address}: {e}")
+        finally:
+            self.handle_client_disconnect(client_socket)
+
+    def handle_messages(self):
+        while True:
+            client_socket, data = self.message_queue.get()
+            message_type = data.get('type', 'message')
+            
+            if message_type == 'bot_command':
+                self.handle_bot_command(client_socket, data)
+            else:
+                self.broadcast_message(data)
+
+    def handle_bot_command(self, client_socket, data):
+        username = self.clients[client_socket]['username']
+        command = data['content']
+        current_discussion = self.clients[client_socket]['discussion_id']
+
+        if command.startswith('/start_discussion'):
+            response = self.ai_bot.handle_command(command, username)
+            # Update discussion_id for all connected clients
+            for client in self.clients:
+                self.clients[client]['discussion_id'] = response['discussion_id']
+            bot_message = response['message']
+        else:
+            bot_message = self.ai_bot.handle_command(command, username, 
+                                                   data['content'], current_discussion)
+
+        self.broadcast_message({
+            'type': 'bot',
+            'content': bot_message,
+            'sender': 'AI Bot'
+        })
+
+    def broadcast_message(self, message_data):
+        message_json = json.dumps(message_data)
+        disconnected_clients = []
+        
+        for client in self.clients:
+            try:
+                client.send(message_json.encode())
+            except:
+                disconnected_clients.append(client)
+                
+        # Clean up disconnected clients
+        for client in disconnected_clients:
+            self.handle_client_disconnect(client)
+
+    def handle_client_disconnect(self, client_socket):
+        if client_socket in self.clients:
+            username = self.clients[client_socket]['username']
+            del self.clients[client_socket]
+            client_socket.close()
+            print(f"User '{username}' disconnected")
+            
+            self.broadcast_message({
+                'type': 'system',
+                'content': f'{username} left the chat',
+                'sender': 'System'
+            })
+
+if __name__ == "__main__":
+    try:
+        server = ChatServer()
+        server.start()
+    except KeyboardInterrupt:
+        print("\nServer shutting down...")
+        server.server_socket.close()
+    except Exception as e:
+        print(f"\nUnexpected error: {e}")
+        server.server_socket.close()

@@ -1,0 +1,287 @@
+# client.py
+import socket
+import threading
+import json
+import tkinter as tk
+from tkinter import scrolledtext, ttk, messagebox
+from datetime import datetime
+import time
+
+class ChatClient:
+    def __init__(self):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.username = None
+        self.connected = False
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 3
+        self.server_ip = None
+        self.server_port = None
+        self.current_discussion_id = None
+
+        # GUI setup
+        self.setup_gui()
+
+    def setup_gui(self):
+        self.root = tk.Tk()
+        self.root.title("MUCA Chat Client")
+        self.root.geometry("1000x700")
+
+        # Configure styles
+        style = ttk.Style()
+        style.configure('Connected.TLabel', foreground='green')
+        style.configure('Disconnected.TLabel', foreground='red')
+
+        # Main container with padding
+        self.main_container = ttk.Frame(self.root, padding="10")
+        self.main_container.pack(fill=tk.BOTH, expand=True)
+
+        # Login Frame
+        self.setup_login_frame()
+
+        # Chat Frame
+        self.setup_chat_frame()
+
+        # Status bar
+        self.setup_status_bar()
+
+    def setup_login_frame(self):
+        self.login_frame = ttk.Frame(self.main_container, padding="20")
+        self.login_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Create a styled frame for login
+        login_container = ttk.LabelFrame(self.login_frame, text="Connect to MUCA Server", padding="20")
+        login_container.pack(padx=20, pady=20, fill=tk.BOTH, expand=True)
+
+        # Server IP
+        ip_frame = ttk.Frame(login_container)
+        ip_frame.pack(fill=tk.X, pady=10)
+        ttk.Label(ip_frame, text="Server IP:", width=15).pack(side=tk.LEFT)
+        self.server_ip_entry = ttk.Entry(ip_frame)
+        self.server_ip_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Server Port
+        port_frame = ttk.Frame(login_container)
+        port_frame.pack(fill=tk.X, pady=10)
+        ttk.Label(port_frame, text="Server Port:", width=15).pack(side=tk.LEFT)
+        self.server_port_entry = ttk.Entry(port_frame)
+        self.server_port_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Username
+        username_frame = ttk.Frame(login_container)
+        username_frame.pack(fill=tk.X, pady=10)
+        ttk.Label(username_frame, text="Username:", width=15).pack(side=tk.LEFT)
+        self.username_entry = ttk.Entry(username_frame)
+        self.username_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Connect Button
+        btn_frame = ttk.Frame(login_container)
+        btn_frame.pack(pady=20)
+        self.connect_btn = ttk.Button(btn_frame, text="Connect to Server",
+                                     command=self.connect_to_server)
+        self.connect_btn.pack(padx=5)
+
+    def setup_chat_frame(self):
+        self.chat_frame = ttk.Frame(self.main_container)
+        self.chat_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Chat display with improved styling
+        self.chat_display = scrolledtext.ScrolledText(self.chat_frame, wrap=tk.WORD,
+                                                     font=('Segoe UI', 10))
+        self.chat_display.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        # Message input area
+        input_frame = ttk.Frame(self.chat_frame)
+        input_frame.pack(fill=tk.X)
+
+        self.message_input = ttk.Entry(input_frame)
+        self.message_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.message_input.bind('<Return>', lambda e: self.send_message())
+
+        self.send_button = ttk.Button(input_frame, text="Send", command=self.send_message)
+        self.send_button.pack(side=tk.RIGHT)
+
+        # Configure text tags
+        self.chat_display.tag_configure('bot', foreground='blue', font=('Segoe UI', 10, 'bold'))
+        self.chat_display.tag_configure('system', foreground='gray', font=('Segoe UI', 10, 'italic'))
+        self.chat_display.tag_configure('message', font=('Segoe UI', 10))
+        self.chat_display.tag_configure('timestamp', foreground='gray', font=('Segoe UI', 8))
+        self.chat_display.tag_configure('error', foreground='red', font=('Segoe UI', 10, 'italic'))
+
+    def setup_status_bar(self):
+        self.status_bar = ttk.Frame(self.root)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
+
+        self.connection_status = ttk.Label(self.status_bar, text="Disconnected",
+                                          style='Disconnected.TLabel')
+        self.connection_status.pack(side=tk.LEFT)
+
+        self.status_message = ttk.Label(self.status_bar, text="")
+        self.status_message.pack(side=tk.RIGHT)
+
+    def connect_to_server(self):
+        self.server_ip = self.server_ip_entry.get().strip()
+        self.server_port = int(self.server_port_entry.get().strip())
+        self.username = self.username_entry.get().strip()
+
+        if not all([self.server_ip, self.server_port, self.username]):
+            messagebox.showerror("Error", "Please fill in all fields")
+            return
+
+        try:
+            self.update_status("Connecting to server...", False)
+            self.connect_btn.config(state='disabled')
+
+            # Try to connect
+            self.socket.connect((self.server_ip, self.server_port))
+            self.socket.send(self.username.encode())
+
+            # Start receiving messages
+            self.connected = True
+            receive_thread = threading.Thread(target=self.receive_messages)
+            receive_thread.daemon = True
+            receive_thread.start()
+
+            # Update GUI
+            self.login_frame.pack_forget()
+            self.chat_frame.pack(fill=tk.BOTH, expand=True)
+            self.root.title(f"MUCA Chat - {self.username}")
+            self.update_status("Connected to server", True)
+
+        except Exception as e:
+            self.connect_btn.config(state='normal')
+            self.update_status(f"Connection failed: {str(e)}", False)
+            messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    def receive_messages(self):
+        while self.connected:
+            try:
+                message = self.socket.recv(1024).decode()
+                if message:
+                    data = json.loads(message)
+                    self.display_message(data)
+
+                    # Update current discussion ID if provided
+                    if 'discussion_id' in data:
+                        self.current_discussion_id = data['discussion_id']
+            except json.JSONDecodeError:
+                continue
+            except Exception as e:
+                if self.connected:
+                    self.connected = False
+                    self.update_status("Connection lost", False)
+                    self.attempt_reconnect()
+                break
+
+    def attempt_reconnect(self):
+        if self.reconnect_attempts < self.max_reconnect_attempts:
+            self.reconnect_attempts += 1
+            self.update_status(
+                f"Attempting to reconnect ({self.reconnect_attempts}/{self.max_reconnect_attempts})...",
+                False
+            )
+
+            try:
+                self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.socket.connect((self.server_ip, self.server_port))
+                self.socket.send(self.username.encode())
+
+                self.connected = True
+                self.reconnect_attempts = 0
+                self.update_status("Reconnected to server", True)
+
+                # Restart message receiving
+                receive_thread = threading.Thread(target=self.receive_messages)
+                receive_thread.daemon = True
+                receive_thread.start()
+
+                return
+            except:
+                time.sleep(2)
+
+        self.update_status("Reconnection failed. Please restart the client.", False)
+        messagebox.showerror("Connection Lost", "Failed to reconnect to server")
+
+    def send_message(self):
+        if not self.connected:
+            messagebox.showwarning("Not Connected", "You are not connected to the server")
+            return
+
+        message = self.message_input.get().strip()
+        if message:
+            self.message_input.delete(0, tk.END)
+
+            # Check if it's a bot command
+            if message.startswith('/'):
+                message_data = {
+                    'type': 'bot_command',
+                    'content': message,
+                    'sender': self.username,
+                    'timestamp': datetime.now().strftime("%H:%M:%S"),
+                    'discussion_id': self.current_discussion_id
+                }
+            else:
+                message_data = {
+                    'type': 'message',
+                    'content': message,
+                    'sender': self.username,
+                    'timestamp': datetime.now().strftime("%H:%M:%S"),
+                    'discussion_id': self.current_discussion_id
+                }
+
+            try:
+                self.socket.send(json.dumps(message_data).encode())
+            except:
+                self.update_status("Failed to send message", False)
+                messagebox.showerror("Error", "Failed to send message")
+
+    def display_message(self, data):
+        message_type = data.get('type', 'message')
+        sender = data.get('sender', 'Unknown')
+        content = data.get('content', '')
+        timestamp = data.get('timestamp', datetime.now().strftime("%H:%M:%S"))
+
+        # Format timestamp
+        timestamp_str = f"[{timestamp}] "
+
+        if message_type == 'bot':
+            prefix = "🤖 AI Bot: "
+            tag = 'bot'
+        elif message_type == 'system':
+            prefix = "🔧 System: "
+            tag = 'system'
+        elif message_type == 'error':
+            prefix = "❌ Error: "
+            tag = 'error'
+        else:
+            prefix = f"👤 {sender}: "
+            tag = 'message'
+
+        self.chat_display.config(state=tk.NORMAL)
+        self.chat_display.insert(tk.END, timestamp_str, 'timestamp')
+        self.chat_display.insert(tk.END, prefix + content + "\n", tag)
+        self.chat_display.config(state=tk.DISABLED)
+        self.chat_display.see(tk.END)
+
+    def update_status(self, message, is_connected=None):
+        self.status_message.config(text=message)
+        if is_connected is not None:
+            status_text = "Connected" if is_connected else "Disconnected"
+            style = 'Connected.TLabel' if is_connected else 'Disconnected.TLabel'
+            self.connection_status.config(text=status_text, style=style)
+
+    def start(self):
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.mainloop()
+
+    def on_closing(self):
+        if self.connected:
+            try:
+                self.socket.close()
+            except:
+                pass
+        self.root.destroy()
+
+if __name__ == "__main__":
+    client = ChatClient()
+    client.start()
